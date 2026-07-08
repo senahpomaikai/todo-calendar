@@ -16,8 +16,11 @@
     --accent: #c96442;
     --accent-bg: #f5e4de;
     --accent-text: #a3441f;
+    --green: #3b7a45;
+    --red: #a13131;
     --radius: 10px;
     --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
@@ -59,10 +62,7 @@
     cursor: pointer;
     color: var(--text-primary);
   }
-  .month-nav button:hover {
-    background: var(--bg);
-    border-color: var(--border-strong);
-  }
+  .month-nav button:hover { background: var(--bg); border-color: var(--border-strong); }
   #monthLabel { font-size: 18px; font-weight: 600; }
   #weekHeader, #grid {
     display: grid;
@@ -182,10 +182,7 @@
     min-width: 0;
   }
   .todo-bubble.done { text-decoration: line-through; opacity: 0.55; }
-  .todo-bubble.event-bubble {
-    background: transparent !important;
-    border: 1.5px dashed currentColor;
-  }
+  .todo-bubble.event-bubble { background: transparent !important; border: 1.5px dashed currentColor; }
   .swatch-btn {
     width: 22px;
     height: 22px;
@@ -234,6 +231,53 @@
     flex-shrink: 0;
   }
   .add-row button.submit-btn:hover { opacity: 0.9; }
+
+  .sync-title { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+  .sync-sub { font-size: 13px; color: var(--text-secondary); margin-bottom: 12px; }
+  .sync-status { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); margin-bottom: 12px; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); flex-shrink: 0; }
+  .status-dot.synced { background: var(--green); }
+  .status-dot.error { background: var(--red); }
+  .status-dot.syncing { background: var(--accent); }
+  .sync-code-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+  .sync-code-box {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 8px 12px;
+    word-break: break-all;
+    flex: 1;
+    min-width: 160px;
+  }
+  .sync-btn {
+    height: 38px;
+    padding: 0 14px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    white-space: nowrap;
+  }
+  .sync-btn:hover { background: var(--bg); border-color: var(--border-strong); }
+  .sync-btn.primary { background: var(--accent); color: white; border-color: var(--accent); }
+  .sync-btn.primary:hover { opacity: 0.9; }
+  .sync-join-row { display: flex; gap: 8px; margin-top: 4px; }
+  .sync-join-row input[type="text"] {
+    flex: 1;
+    height: 38px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    padding: 0 10px;
+    font-size: 13px;
+    font-family: var(--font-mono);
+  }
+  .sync-join-row input[type="text"]:focus { outline: none; border-color: var(--accent); }
+  .sync-divider { border-top: 1px solid var(--border); margin: 14px 0; }
 </style>
 </head>
 <body>
@@ -249,11 +293,15 @@
     <div id="grid"></div>
   </div>
   <div class="card" id="dayPanel"></div>
+  <div class="card" id="syncCard"></div>
 </div>
 
 <script>
 (function () {
   var STORAGE_KEY = 'todoCalendarData';
+  var SYNC_ID_KEY = 'todoCalendarSyncId';
+  var JSONBLOB_BASE = 'https://jsonblob.com/api/jsonBlob';
+
   var todos = {};
   try {
     var saved = localStorage.getItem(STORAGE_KEY);
@@ -261,6 +309,11 @@
   } catch (e) {
     todos = {};
   }
+
+  var syncId = null;
+  try { syncId = localStorage.getItem(SYNC_ID_KEY); } catch (e) {}
+  var syncStatus = syncId ? 'syncing' : 'idle';
+  var syncMessage = '';
 
   var COLORS = {
     gray:   { bg: '#ece9e3', text: '#57554f' },
@@ -288,15 +341,84 @@
     return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
   }
 
-  function save() {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(todos));
-    } catch (e) {}
+  function saveLocal() {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(todos)); } catch (e) {}
   }
 
-  function monthName(m) {
-    var names = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-    return names[m];
+  function save() {
+    saveLocal();
+    if (syncId) pushToRemote();
+  }
+
+  function setSyncStatus(status, message) {
+    syncStatus = status;
+    syncMessage = message || '';
+    renderSyncPanel();
+  }
+
+  function pushToRemote() {
+    setSyncStatus('syncing');
+    fetch(JSONBLOB_BASE + '/' + syncId, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify(todos)
+    }).then(function (res) {
+      if (!res.ok) throw new Error('push failed');
+      setSyncStatus('synced');
+    }).catch(function () {
+      setSyncStatus('error', 'Could not reach the sync server. Your changes are saved locally.');
+    });
+  }
+
+  function pullFromRemote(silent) {
+    if (!syncId) return;
+    if (!silent) setSyncStatus('syncing');
+    fetch(JSONBLOB_BASE + '/' + syncId, { headers: { 'Accept': 'application/json' } })
+      .then(function (res) {
+        if (!res.ok) throw new Error('pull failed');
+        return res.json();
+      })
+      .then(function (data) {
+        todos = data && typeof data === 'object' ? data : {};
+        saveLocal();
+        setSyncStatus('synced');
+        render();
+      })
+      .catch(function () {
+        setSyncStatus('error', 'Could not load that sync code. Double check it and try again.');
+      });
+  }
+
+  function createSyncCode() {
+    setSyncStatus('syncing');
+    fetch(JSONBLOB_BASE, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify(todos)
+    }).then(function (res) {
+      var loc = res.headers.get('Location');
+      var id = loc ? loc.split('/').pop() : null;
+      if (!res.ok || !id) throw new Error('create failed');
+      syncId = id;
+      try { localStorage.setItem(SYNC_ID_KEY, syncId); } catch (e) {}
+      setSyncStatus('synced');
+    }).catch(function () {
+      setSyncStatus('error', 'Could not create a sync code right now. Try again in a moment.');
+    });
+  }
+
+  function connectSyncCode(id) {
+    var trimmed = id.trim();
+    if (!trimmed) return;
+    syncId = trimmed;
+    try { localStorage.setItem(SYNC_ID_KEY, syncId); } catch (e) {}
+    pullFromRemote(false);
+  }
+
+  function disconnectSync() {
+    syncId = null;
+    try { localStorage.removeItem(SYNC_ID_KEY); } catch (e) {}
+    setSyncStatus('idle');
   }
 
   function toggleDone(key, id, val) {
@@ -379,9 +501,7 @@
             cb.checked = item.done;
             let thisKey = key;
             let thisId = item.id;
-            cb.addEventListener('click', function (e) {
-              e.stopPropagation();
-            });
+            cb.addEventListener('click', function (e) { e.stopPropagation(); });
             cb.addEventListener('change', function () {
               toggleDone(thisKey, thisId, cb.checked);
               render();
@@ -415,6 +535,12 @@
     }
 
     renderDayPanel();
+    renderSyncPanel();
+  }
+
+  function monthName(m) {
+    var names = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    return names[m];
   }
 
   function renderDayPanel() {
@@ -526,20 +652,14 @@
     todoBtn.type = 'button';
     todoBtn.className = 'type-btn' + (addType === 'todo' ? ' active' : '');
     todoBtn.textContent = 'To-do';
-    todoBtn.addEventListener('click', function () {
-      addType = 'todo';
-      renderDayPanel();
-    });
+    todoBtn.addEventListener('click', function () { addType = 'todo'; renderDayPanel(); });
     typeToggle.appendChild(todoBtn);
 
     var eventBtn = document.createElement('button');
     eventBtn.type = 'button';
     eventBtn.className = 'type-btn' + (addType === 'event' ? ' active' : '');
     eventBtn.textContent = 'Event / blocked time';
-    eventBtn.addEventListener('click', function () {
-      addType = 'event';
-      renderDayPanel();
-    });
+    eventBtn.addEventListener('click', function () { addType = 'event'; renderDayPanel(); });
     typeToggle.appendChild(eventBtn);
 
     panel.appendChild(typeToggle);
@@ -562,11 +682,7 @@
       var val = input.value.trim();
       if (!val) return;
       if (!todos[selectedKey]) todos[selectedKey] = [];
-      var newItem = {
-        id: idCounter++,
-        text: val,
-        type: addType
-      };
+      var newItem = { id: idCounter++, text: val, type: addType };
       if (addType === 'event') {
         newItem.color = DEFAULT_EVENT_COLOR;
       } else {
@@ -581,11 +697,111 @@
     }
 
     addBtn.addEventListener('click', addItem);
-    input.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter') addItem();
-    });
+    input.addEventListener('keydown', function (e) { if (e.key === 'Enter') addItem(); });
 
     panel.appendChild(addRow);
+  }
+
+  function renderSyncPanel() {
+    var card = document.getElementById('syncCard');
+    if (!card) return;
+    card.innerHTML = '';
+
+    var title = document.createElement('div');
+    title.className = 'sync-title';
+    title.textContent = 'Sync across devices';
+    card.appendChild(title);
+
+    var sub = document.createElement('div');
+    sub.className = 'sync-sub';
+    sub.textContent = 'Use the same code on another device to see the same calendar there.';
+    card.appendChild(sub);
+
+    var statusRow = document.createElement('div');
+    statusRow.className = 'sync-status';
+    var dot = document.createElement('span');
+    dot.className = 'status-dot' + (syncStatus === 'synced' ? ' synced' : syncStatus === 'error' ? ' error' : syncStatus === 'syncing' ? ' syncing' : '');
+    statusRow.appendChild(dot);
+    var statusText = document.createElement('span');
+    if (syncStatus === 'idle') statusText.textContent = 'Not syncing yet, this device only.';
+    else if (syncStatus === 'syncing') statusText.textContent = 'Syncing...';
+    else if (syncStatus === 'synced') statusText.textContent = 'Synced';
+    else if (syncStatus === 'error') statusText.textContent = syncMessage || 'Sync error';
+    statusRow.appendChild(statusText);
+    card.appendChild(statusRow);
+
+    if (syncId) {
+      var codeRow = document.createElement('div');
+      codeRow.className = 'sync-code-row';
+
+      var codeBox = document.createElement('div');
+      codeBox.className = 'sync-code-box';
+      codeBox.textContent = syncId;
+      codeRow.appendChild(codeBox);
+
+      var copyBtn = document.createElement('button');
+      copyBtn.className = 'sync-btn';
+      copyBtn.textContent = 'Copy code';
+      copyBtn.addEventListener('click', function () {
+        if (navigator.clipboard) {
+          navigator.clipboard.writeText(syncId).then(function () {
+            copyBtn.textContent = 'Copied';
+            setTimeout(function () { copyBtn.textContent = 'Copy code'; }, 1500);
+          });
+        }
+      });
+      codeRow.appendChild(copyBtn);
+
+      var refreshBtn = document.createElement('button');
+      refreshBtn.className = 'sync-btn';
+      refreshBtn.textContent = 'Refresh now';
+      refreshBtn.addEventListener('click', function () { pullFromRemote(false); });
+      codeRow.appendChild(refreshBtn);
+
+      var disconnectBtn = document.createElement('button');
+      disconnectBtn.className = 'sync-btn';
+      disconnectBtn.textContent = 'Turn off sync';
+      disconnectBtn.addEventListener('click', disconnectSync);
+      codeRow.appendChild(disconnectBtn);
+
+      card.appendChild(codeRow);
+    } else {
+      var createBtn = document.createElement('button');
+      createBtn.className = 'sync-btn primary';
+      createBtn.textContent = 'Create sync code';
+      createBtn.addEventListener('click', createSyncCode);
+      card.appendChild(createBtn);
+
+      var divider = document.createElement('div');
+      divider.className = 'sync-divider';
+      card.appendChild(divider);
+
+      var joinLabel = document.createElement('div');
+      joinLabel.className = 'sync-sub';
+      joinLabel.style.marginBottom = '6px';
+      joinLabel.textContent = 'Already have a code from another device?';
+      card.appendChild(joinLabel);
+
+      var joinRow = document.createElement('div');
+      joinRow.className = 'sync-join-row';
+
+      var joinInput = document.createElement('input');
+      joinInput.type = 'text';
+      joinInput.placeholder = 'Paste sync code';
+      joinRow.appendChild(joinInput);
+
+      var joinBtn = document.createElement('button');
+      joinBtn.className = 'sync-btn';
+      joinBtn.textContent = 'Connect';
+      joinBtn.addEventListener('click', function () { connectSyncCode(joinInput.value); });
+      joinRow.appendChild(joinBtn);
+
+      joinInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') connectSyncCode(joinInput.value);
+      });
+
+      card.appendChild(joinRow);
+    }
   }
 
   document.getElementById('prevBtn').addEventListener('click', function () {
@@ -601,6 +817,12 @@
   });
 
   render();
+
+  if (syncId) pullFromRemote(true);
+
+  setInterval(function () {
+    if (syncId) pullFromRemote(true);
+  }, 20000);
 })();
 </script>
 </body>
