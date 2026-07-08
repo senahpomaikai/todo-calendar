@@ -134,7 +134,9 @@
 
   .sync-title { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
   .sync-sub { font-size: 13px; color: var(--text-secondary); margin-bottom: 12px; }
-  .sync-status { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); margin-bottom: 12px; }
+  .sync-sub a { color: var(--accent-text); }
+  .sync-status { display: flex; align-items: flex-start; gap: 6px; font-size: 13px; color: var(--text-secondary); margin-bottom: 12px; }
+  .sync-status span:last-child { word-break: break-word; }
   .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); flex-shrink: 0; }
   .status-dot.synced { background: var(--green); }
   .status-dot.error { background: var(--red); }
@@ -208,7 +210,8 @@
 (function () {
   var STORAGE_KEY = 'todoCalendarData';
   var SYNC_KEY = 'todoCalendarSync';
-  var JSONHOSTING_BASE = 'https://jsonhosting.com/api/json';
+  var GIST_BASE = 'https://api.github.com/gists';
+  var GIST_FILENAME = 'todo-calendar-data.json';
 
   var todos = {};
   try {
@@ -280,65 +283,101 @@
   function pushToRemote() {
     if (!syncInfo) return;
     setSyncStatus('syncing');
-    fetch(JSONHOSTING_BASE + '/' + syncInfo.id, {
+    fetch(GIST_BASE + '/' + syncInfo.gistId, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json', 'X-Edit-Key': syncInfo.editKey },
-      body: JSON.stringify(todos)
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + syncInfo.token,
+        'Accept': 'application/vnd.github+json'
+      },
+      body: JSON.stringify({ files: { [GIST_FILENAME]: { content: JSON.stringify(todos) } } })
     }).then(function (res) {
-      if (!res.ok) throw new Error('push failed');
+      if (!res.ok) return res.text().then(function (t) { throw new Error('Status ' + res.status + (t ? ': ' + t.slice(0, 200) : '')); });
       setSyncStatus('synced');
-    }).catch(function () {
-      setSyncStatus('error', 'Could not reach the sync server. Your changes are still saved on this device.');
+    }).catch(function (err) {
+      console.error('Sync push error:', err);
+      setSyncStatus('error', 'Push failed: ' + (err && err.message ? err.message : 'unknown error') + ' (see browser console)');
     });
   }
 
   function pullFromRemote(silent) {
     if (!syncInfo) return;
     if (!silent) setSyncStatus('syncing');
-    fetch(JSONHOSTING_BASE + '/' + syncInfo.id, { headers: { 'Accept': 'application/json' } })
+    fetch(GIST_BASE + '/' + syncInfo.gistId, {
+      headers: {
+        'Authorization': 'Bearer ' + syncInfo.token,
+        'Accept': 'application/vnd.github+json'
+      }
+    })
       .then(function (res) {
-        if (!res.ok) throw new Error('pull failed');
+        if (!res.ok) return res.text().then(function (t) { throw new Error('Status ' + res.status + (t ? ': ' + t.slice(0, 200) : '')); });
         return res.json();
       })
       .then(function (data) {
-        todos = data && typeof data === 'object' ? data : {};
+        var file = data.files && data.files[GIST_FILENAME];
+        var parsed = {};
+        if (file && file.content) {
+          try { parsed = JSON.parse(file.content); } catch (e) { parsed = {}; }
+        }
+        todos = parsed && typeof parsed === 'object' ? parsed : {};
         saveLocal();
         setSyncStatus('synced');
         refreshAll();
       })
-      .catch(function () {
-        setSyncStatus('error', 'Could not load that sync code. Double check it and try again.');
+      .catch(function (err) {
+        console.error('Sync pull error:', err);
+        setSyncStatus('error', 'Load failed: ' + (err && err.message ? err.message : 'unknown error') + ' (see browser console)');
       });
   }
 
-  function createSyncCode() {
+  function createSyncCode(token) {
+    var trimmedToken = (token || '').trim();
+    if (!trimmedToken) {
+      setSyncStatus('error', 'Paste your GitHub personal access token first.');
+      return;
+    }
     setSyncStatus('syncing');
-    fetch(JSONHOSTING_BASE, {
+    fetch(GIST_BASE, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(todos)
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + trimmedToken,
+        'Accept': 'application/vnd.github+json'
+      },
+      body: JSON.stringify({
+        description: 'To-do calendar sync data',
+        public: false,
+        files: { [GIST_FILENAME]: { content: JSON.stringify(todos) } }
+      })
     }).then(function (res) {
-      if (!res.ok) throw new Error('create failed');
+      if (!res.ok) return res.text().then(function (t) { throw new Error('Status ' + res.status + (t ? ': ' + t.slice(0, 200) : '')); });
       return res.json();
     }).then(function (data) {
-      if (!data || !data.id || !data.editKey) throw new Error('bad response');
-      syncInfo = { id: data.id, editKey: data.editKey };
+      if (!data || !data.id) throw new Error('Response was missing a gist id');
+      syncInfo = { gistId: data.id, token: trimmedToken };
       try { localStorage.setItem(SYNC_KEY, JSON.stringify(syncInfo)); } catch (e) {}
       setSyncStatus('synced');
-    }).catch(function () {
-      setSyncStatus('error', 'Could not create a sync code right now. Try again in a moment.');
+    }).catch(function (err) {
+      console.error('Sync create error:', err);
+      setSyncStatus('error', 'Create failed: ' + (err && err.message ? err.message : 'unknown error') + ' (see browser console)');
     });
   }
 
   function connectSyncCode(rawCode) {
     var trimmed = rawCode.trim();
     if (!trimmed) return;
-    var parts = trimmed.split('::');
-    if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    var idx = trimmed.indexOf('::');
+    if (idx === -1) {
       setSyncStatus('error', "That code doesn't look right. Copy the full code from the other device.");
       return;
     }
-    syncInfo = { id: parts[0], editKey: parts[1] };
+    var gistId = trimmed.slice(0, idx);
+    var token = trimmed.slice(idx + 2);
+    if (!gistId || !token) {
+      setSyncStatus('error', "That code doesn't look right. Copy the full code from the other device.");
+      return;
+    }
+    syncInfo = { gistId: gistId, token: token };
     try { localStorage.setItem(SYNC_KEY, JSON.stringify(syncInfo)); } catch (e) {}
     pullFromRemote(false);
   }
@@ -792,11 +831,6 @@
     title.textContent = 'Sync across devices';
     card.appendChild(title);
 
-    var sub = document.createElement('div');
-    sub.className = 'sync-sub';
-    sub.textContent = 'Use the same code on another device to see the same calendar there.';
-    card.appendChild(sub);
-
     var statusRow = document.createElement('div');
     statusRow.className = 'sync-status';
     var dot = document.createElement('span');
@@ -811,12 +845,17 @@
     card.appendChild(statusRow);
 
     if (syncInfo) {
+      var sub = document.createElement('div');
+      sub.className = 'sync-sub';
+      sub.textContent = 'Paste this full code on another device to see the same calendar there.';
+      card.appendChild(sub);
+
       var codeRow = document.createElement('div');
       codeRow.className = 'sync-code-row';
 
       var codeBox = document.createElement('div');
       codeBox.className = 'sync-code-box';
-      var fullCode = syncInfo.id + '::' + syncInfo.editKey;
+      var fullCode = syncInfo.gistId + '::' + syncInfo.token;
       codeBox.textContent = fullCode;
       codeRow.appendChild(codeBox);
 
@@ -847,11 +886,33 @@
 
       card.appendChild(codeRow);
     } else {
+      var sub2 = document.createElement('div');
+      sub2.className = 'sync-sub';
+      sub2.innerHTML = 'Uses a private GitHub Gist to store your data. Create a token at ' +
+        '<a href="https://github.com/settings/tokens/new?scopes=gist&description=todo-calendar-sync" target="_blank" rel="noopener">github.com/settings/tokens</a> ' +
+        '(classic token, check only the "gist" scope), then paste it below.';
+      card.appendChild(sub2);
+
+      var tokenRow = document.createElement('div');
+      tokenRow.className = 'sync-join-row';
+      tokenRow.style.marginBottom = '10px';
+
+      var tokenInput = document.createElement('input');
+      tokenInput.type = 'password';
+      tokenInput.placeholder = 'Paste GitHub token (starts with ghp_ or github_pat_)';
+      tokenRow.appendChild(tokenInput);
+
       var createBtn = document.createElement('button');
       createBtn.className = 'sync-btn primary';
       createBtn.textContent = 'Create sync code';
-      createBtn.addEventListener('click', createSyncCode);
-      card.appendChild(createBtn);
+      createBtn.addEventListener('click', function () { createSyncCode(tokenInput.value); });
+      tokenRow.appendChild(createBtn);
+
+      tokenInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') createSyncCode(tokenInput.value);
+      });
+
+      card.appendChild(tokenRow);
 
       var divider = document.createElement('div');
       divider.className = 'sync-divider';
